@@ -23,17 +23,19 @@ async function getCachedOrFetch(url, storageKey) {
 // Drop stale skin caches so clients refetch the updated blob. The key is bumped
 // whenever the bundled skins change (v2 = dead-CDN image fix; v3 = +330 skins
 // added, incl. the missing Zeus x27 finishes; v4 = +34 skins from the 2026-07-08
-// update). Removing the old keys also frees their ~5MB blobs so the new entry
-// doesn't trip the localStorage quota.
+// update; v5 = fixed the 34 dead image URLs of those skins). Removing the old
+// keys also frees their ~5MB blobs so the new entry doesn't trip the
+// localStorage quota.
 ["en", "pt-BR", "ru", "zh-CN"].forEach((l) => {
   localStorage.removeItem(`${l}-skins`);
   localStorage.removeItem(`${l}-skins-v2`);
   localStorage.removeItem(`${l}-skins-v3`);
+  localStorage.removeItem(`${l}-skins-v4`);
 });
 
 export let skinsObject = await getCachedOrFetch(
   `/js/json/skins/${lang}-skins.json`,
-  `${lang}-skins-v4`
+  `${lang}-skins-v5`
 );
 export let defaultsObject = await getCachedOrFetch(
   `/js/json/defaults/${lang}-defaults.json`,
