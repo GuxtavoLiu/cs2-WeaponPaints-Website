@@ -6,6 +6,7 @@ const passportSteam = require("passport-steam");
 const SteamStrategy = passportSteam.Strategy;
 const mysql = require("mysql2");
 const path = require("path");
+const os = require("os");
 const { decodeInspectLink } = require("./inspectLink");
 
 // Knife item-definition-index -> weapon_name (for equipping the knife model when
@@ -60,13 +61,67 @@ const dbg = (...args) => { if (DEBUG) console.log("[WP_DEBUG]", ...args); };
 
 const PORT = config.PORT;
 
-let returnURL = `${config.PROTOCOL}://${config.HOST}${config.SUBDIR}api/auth/steam/return`;
-let realm = `${config.PROTOCOL}://${config.HOST}${config.SUBDIR}`;
+// The site is reached by whatever address the machine happens to have that day:
+// the LAN IP at a presential LAN, the VPN IP when playing remotely, localhost on
+// the host itself. Steam's OpenID return_to has to match the address the browser
+// actually used, so the strategy is built per host instead of once from
+// config.HOST. Only addresses this machine really owns are accepted, so a forged
+// Host header cannot send the login somewhere else.
+const hostnameOf = (host) => String(host || "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
 
-if (config.HOST == "localhost" || config.HOST == "127.0.0.1") {
-  returnURL = `${config.PROTOCOL}://${config.HOST}:${config.PORT}${config.SUBDIR}api/auth/steam/return`;
-  realm = `${config.PROTOCOL}://${config.HOST}:${config.PORT}${config.SUBDIR}`;
-}
+const ownHosts = () => {
+  const hosts = new Set(["localhost", "127.0.0.1", "::1"]);
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name] || []) {
+      if (iface && iface.address) hosts.add(iface.address);
+    }
+  }
+  if (config.HOST) hosts.add(hostnameOf(config.HOST));
+  return hosts;
+};
+
+const steamStrategies = new Set();
+
+// Registers, once per host, a Steam strategy whose returnURL points back at the
+// same address the browser used. Returns null for a Host this machine does not own.
+const steamStrategyFor = (req) => {
+  const host = String(req.headers.host || "");
+  if (!host) return null;
+  if (!ownHosts().has(hostnameOf(host))) {
+    console.warn(`Steam login refused for unknown Host header: ${host}`);
+    return null;
+  }
+  const name = `steam:${host}`;
+  if (!steamStrategies.has(name)) {
+    const base = `${config.PROTOCOL}://${host}${config.SUBDIR}`;
+    passport.use(
+      name,
+      new SteamStrategy(
+        {
+          returnURL: `${base}api/auth/steam/return`,
+          realm: base,
+          apiKey: config.STEAMAPIKEY,
+        },
+        function (identifier, profile, done) {
+          process.nextTick(function () {
+            profile.identifier = identifier;
+            return done(null, profile);
+          });
+        }
+      )
+    );
+    steamStrategies.add(name);
+    console.log(`Steam login enabled for ${base}`);
+  }
+  return name;
+};
+
+const authenticateSteam = (req, res, next) => {
+  const name = steamStrategyFor(req);
+  if (!name) return res.redirect(config.SUBDIR);
+  return passport.authenticate(name, { failureRedirect: config.SUBDIR })(req, res, next);
+};
 
 // connect to db. A promise pool replaces the old single callback connection:
 // it manages reconnection itself (no manual heartbeat needed) and lets the
@@ -109,22 +164,7 @@ passport.serializeUser((user, done) => {
 passport.deserializeUser((user, done) => {
   done(null, user);
 });
-// Initiate Strategy
-passport.use(
-  new SteamStrategy(
-    {
-      returnURL: returnURL,
-      realm: realm,
-      apiKey: config.STEAMAPIKEY,
-    },
-    function (identifier, profile, done) {
-      process.nextTick(function () {
-        profile.identifier = identifier;
-        return done(null, profile);
-      });
-    }
-  )
-);
+// Strategy is registered on demand, per host, by steamStrategyFor() above.
 app.use(
   session({
     store: new FileStore(fileStoreOptions),
@@ -222,7 +262,7 @@ app.get(`${config.SUBDIR}api/sticker-img`, async (req, res) => {
 
 app.get(
   `${config.SUBDIR}api/auth/steam`,
-  passport.authenticate("steam", { failureRedirect: config.SUBDIR }),
+  authenticateSteam,
   function (req, res) {
     res.redirect("/");
   }
@@ -230,7 +270,7 @@ app.get(
 
 app.get(
   `${config.SUBDIR}api/auth/steam/return`,
-  passport.authenticate("steam", { failureRedirect: config.SUBDIR }),
+  authenticateSteam,
   function (req, res) {
     res.redirect("/");
   }
